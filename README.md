@@ -1,8 +1,8 @@
-# 🚨 Chicago Crime Intelligence Dashboard
+#  Chicago Crime Intelligence Dashboard
 
 A robust, interactive **Streamlit** dashboard and data pipeline built to analyze, visualize, and forecast crime patterns across Chicago. This application provides high-level metrics, geospatial heatmaps, and time-series forecasting using an elegant, fully responsive dark-mode UI.
 
-## ✨ Features
+##  Features
 
 - **Interactive UI**: A highly polished, custom-styled dark theme dashboard utilizing modern typography (Outfit Font).
 - **Data Filtering**: Filter the entire dataset instantly by Year, Crime Type, and District via the intelligence sidebar.
@@ -14,7 +14,7 @@ A robust, interactive **Streamlit** dashboard and data pipeline built to analyze
   - KPI Metrics (Total Crimes, Most Common Crimes, Arrest Rates, etc.)
 - **Forecasting Module**: Built-in Linear Regression model (`scikit-learn`) for predicting future monthly crime counts based on historical data.
 
-## 🛠️ Technology Stack
+##  Technology Stack
 
 - **Frontend/UI**: Streamlit
 - **Data Manipulation**: Pandas, NumPy
@@ -35,14 +35,14 @@ A robust, interactive **Streamlit** dashboard and data pipeline built to analyze
 └── requirements.txt         # Required Python dependencies
 ```
 
-## 🚀 Getting Started
+##  Getting Started
 
 Follow these steps to set up the project locally.
 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/chicago-crime-dashboard.git
+git clone https://github.com/May-nk/chicago-crime-dashboard.git
 cd chicago-crime-dashboard
 ```
 
