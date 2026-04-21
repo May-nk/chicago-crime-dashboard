@@ -5,6 +5,7 @@ Main application file for interactive crime data visualization and analysis.
 
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import folium
@@ -88,6 +89,23 @@ st.markdown("""
         border-bottom: 3px solid #00E6FF !important;
         color: #00E6FF !important;
         font-weight: 600 !important;
+    }
+
+    /* Styled dataframe table */
+    .quality-card {
+        background-color: #1A1C24;
+        border: 1px solid #2D3748;
+        border-radius: 12px;
+        padding: 24px;
+        margin-bottom: 1rem;
+    }
+    .quality-card h4 {
+        color: #FAFAFA;
+        margin-bottom: 12px;
+    }
+    .quality-card p {
+        color: #A0AEC0;
+        font-size: 14px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -380,6 +398,300 @@ def display_heatmap(df):
     st.components.v1.html(map_html, width=1200, height=500)
 
 
+# ---------------------------------------------------------------------------
+# DATA QUALITY & STATISTICS — New Tab Functions
+# ---------------------------------------------------------------------------
+
+@st.cache_data
+def compute_data_quality_summary(_df):
+    """
+    Compute high-level data quality metrics for the dataset.
+    
+    Args:
+        _df (pd.DataFrame): Dataset to analyse (prefixed with _ for cache hashing).
+    
+    Returns:
+        dict: Dictionary containing total_rows, total_columns, duplicate_rows,
+              total_missing values.
+    """
+    return {
+        "total_rows": len(_df),
+        "total_columns": len(_df.columns),
+        "duplicate_rows": int(_df.duplicated().sum()),
+        "total_missing": int(_df.isnull().sum().sum()),
+    }
+
+
+@st.cache_data
+def compute_column_summary(_df):
+    """
+    Build a per-column quality summary table.
+    
+    Args:
+        _df (pd.DataFrame): Dataset to analyse.
+    
+    Returns:
+        pd.DataFrame: Table with Column, Data Type, Missing Values,
+                      Missing %, and Unique Values.
+    """
+    records = []
+    for col in _df.columns:
+        missing = int(_df[col].isnull().sum())
+        records.append({
+            "Column": col,
+            "Data Type": str(_df[col].dtype),
+            "Missing Values": missing,
+            "Missing %": round(missing / len(_df) * 100, 2) if len(_df) > 0 else 0.0,
+            "Unique Values": int(_df[col].nunique()),
+        })
+    return pd.DataFrame(records)
+
+
+@st.cache_data
+def compute_statistics(_df):
+    """
+    Compute descriptive statistics for all numeric columns.
+    
+    Args:
+        _df (pd.DataFrame): Dataset to analyse.
+    
+    Returns:
+        pd.DataFrame: Table with Mean, Median, Mode, Std Dev, Min, Max per column.
+    """
+    numeric_df = _df.select_dtypes(include='number')
+    if numeric_df.empty:
+        return pd.DataFrame()
+
+    records = []
+    for col in numeric_df.columns:
+        mode_val = numeric_df[col].mode()
+        records.append({
+            "Column": col,
+            "Mean": round(numeric_df[col].mean(), 4),
+            "Median": round(numeric_df[col].median(), 4),
+            "Mode": round(mode_val.iloc[0], 4) if not mode_val.empty else np.nan,
+            "Std Dev": round(numeric_df[col].std(), 4),
+            "Min": round(numeric_df[col].min(), 4),
+            "Max": round(numeric_df[col].max(), 4),
+        })
+    return pd.DataFrame(records)
+
+
+def display_data_quality(df):
+    """
+    Render the Data Quality section inside the new tab.
+    
+    Shows high-level KPI cards and a column-wise summary table.
+    """
+    st.subheader("Data Quality Overview")
+    st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
+
+    summary = compute_data_quality_summary(df)
+
+    # KPI row
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.metric(label="Total Rows", value=f"{summary['total_rows']:,}")
+    with c2:
+        st.metric(label="Total Columns", value=f"{summary['total_columns']}")
+    with c3:
+        st.metric(label="Duplicate Rows", value=f"{summary['duplicate_rows']:,}")
+    with c4:
+        st.metric(label="Total Missing Values", value=f"{summary['total_missing']:,}")
+
+    st.markdown("<div style='margin-top: 1.5rem;'></div>", unsafe_allow_html=True)
+
+    # Column-wise summary table
+    st.markdown("##### Column-wise Quality Summary")
+    col_summary = compute_column_summary(df)
+    st.dataframe(
+        col_summary.style.background_gradient(
+            subset=["Missing %"], cmap="YlOrRd", vmin=0, vmax=100
+        ).format({"Missing %": "{:.2f}%"}),
+        use_container_width=True,
+        hide_index=True,
+        height=min(len(col_summary) * 38 + 40, 500),
+    )
+
+
+def display_statistics(df):
+    """
+    Render descriptive statistics for numeric columns in a styled table.
+    """
+    st.subheader("Statistical Analysis — Numeric Columns")
+    stats = compute_statistics(df)
+
+    if stats.empty:
+        st.info("No numeric columns found in the dataset.")
+        return
+
+    st.dataframe(
+        stats.style.format(
+            {c: "{:.4f}" for c in ["Mean", "Median", "Mode", "Std Dev", "Min", "Max"]}
+        ).set_properties(**{"text-align": "right"}),
+        use_container_width=True,
+        hide_index=True,
+        height=min(len(stats) * 38 + 40, 400),
+    )
+
+
+def display_missing_chart(df):
+    """
+    Render a horizontal bar chart of missing values per column.
+    """
+    st.subheader("Missing Values by Column")
+
+    missing = df.isnull().sum()
+    missing = missing[missing > 0].sort_values(ascending=True)
+
+    if missing.empty:
+        st.success("No missing values detected in any column.")
+        return
+
+    fig, ax = plt.subplots(figsize=(10, max(4, len(missing) * 0.5)))
+    bars = ax.barh(missing.index, missing.values, color='#FEB019', alpha=0.85, height=0.6)
+    ax.set_title('Missing Values per Column', fontsize=14, fontweight='bold', pad=15)
+    ax.set_xlabel('Missing Count', fontsize=11)
+    ax.grid(True, axis='x', color='#2D3748', alpha=0.5, linestyle='--')
+    style_plot(fig, ax)
+
+    for bar, val in zip(bars, missing.values):
+        ax.text(val + max(missing.values) * 0.01, bar.get_y() + bar.get_height() / 2,
+                f'{val:,}', va='center', fontsize=10, color='#00E6FF', fontweight='bold')
+
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+
+def display_correlation(df):
+    """
+    Render a seaborn heatmap of correlations between numeric columns.
+    """
+    st.subheader("Correlation Heatmap")
+
+    numeric_df = df.select_dtypes(include='number')
+
+    if numeric_df.shape[1] < 2:
+        st.info("At least two numeric columns are required for a correlation heatmap.")
+        return
+
+    corr = numeric_df.corr()
+
+    fig, ax = plt.subplots(figsize=(max(8, len(corr.columns) * 0.9),
+                                    max(6, len(corr.columns) * 0.7)))
+    mask = np.triu(np.ones_like(corr, dtype=bool))
+    cmap = sns.diverging_palette(220, 10, as_cmap=True)
+    sns.heatmap(
+        corr,
+        mask=mask,
+        cmap=cmap,
+        vmin=-1,
+        vmax=1,
+        center=0,
+        annot=True,
+        fmt=".2f",
+        linewidths=0.5,
+        linecolor='#2D3748',
+        square=True,
+        cbar_kws={"shrink": 0.8},
+        ax=ax,
+        annot_kws={"size": 10, "color": "#FAFAFA"},
+    )
+    ax.set_title('Correlation Matrix', fontsize=14, fontweight='bold', pad=15)
+    ax.tick_params(colors='#A0AEC0', labelsize=10)
+    fig.patch.set_facecolor('#0E1117')
+    ax.set_facecolor('#1A1C24')
+
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+
+def display_boxplots(df):
+    """
+    Render box plots for numeric columns to visualise outliers.
+    """
+    st.subheader("Box Plots — Outlier Detection")
+
+    numeric_cols = df.select_dtypes(include='number').columns.tolist()
+    if not numeric_cols:
+        st.info("No numeric columns available for box plots.")
+        return
+
+    selected_col = st.selectbox(
+        "Select a numeric column",
+        options=numeric_cols,
+        key="boxplot_col_select",
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bp = ax.boxplot(
+        df[selected_col].dropna(),
+        vert=True,
+        patch_artist=True,
+        boxprops=dict(facecolor='#775DD0', color='#00E6FF', alpha=0.7),
+        whiskerprops=dict(color='#A0AEC0'),
+        capprops=dict(color='#A0AEC0'),
+        medianprops=dict(color='#00E6FF', linewidth=2),
+        flierprops=dict(marker='o', markerfacecolor='#FF4560', markersize=5, alpha=0.6),
+    )
+    ax.set_title(f'Box Plot — {selected_col}', fontsize=14, fontweight='bold', pad=15)
+    ax.set_ylabel(selected_col, fontsize=11)
+    ax.grid(True, axis='y', color='#2D3748', alpha=0.5, linestyle='--')
+    style_plot(fig, ax)
+
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+
+def display_distribution(df):
+    """
+    Render histogram + KDE for a selected numeric column.
+    """
+    st.subheader("Distribution Plot — Histogram + KDE")
+
+    numeric_cols = df.select_dtypes(include='number').columns.tolist()
+    if not numeric_cols:
+        st.info("No numeric columns available for distribution plots.")
+        return
+
+    selected_col = st.selectbox(
+        "Select a numeric column",
+        options=numeric_cols,
+        key="dist_col_select",
+    )
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    data = df[selected_col].dropna()
+    ax.hist(data, bins=50, color='#00E396', alpha=0.5, edgecolor='#1A1C24', density=True, label='Histogram')
+
+    # KDE overlay
+    try:
+        from scipy.stats import gaussian_kde
+        kde_x = np.linspace(data.min(), data.max(), 300)
+        kde = gaussian_kde(data)
+        ax.plot(kde_x, kde(kde_x), color='#00E6FF', linewidth=2.5, label='KDE')
+    except Exception:
+        pass  # Skip KDE if scipy is not available
+
+    ax.set_title(f'Distribution — {selected_col}', fontsize=14, fontweight='bold', pad=15)
+    ax.set_xlabel(selected_col, fontsize=11)
+    ax.set_ylabel('Density', fontsize=11)
+    ax.legend(facecolor='#1A1C24', edgecolor='#2D3748', labelcolor='#A0AEC0')
+    ax.grid(True, axis='y', color='#2D3748', alpha=0.5, linestyle='--')
+    style_plot(fig, ax)
+
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+
+# ---------------------------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------------------------
+
 def main():
     """
     Main function to run the Streamlit application.
@@ -461,10 +773,11 @@ def main():
     st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
     
     # Visual sections embedded in professional tabs
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "Overview & Trends", 
         "Demographics & Time", 
-        "Geospatial Analysis"
+        "Geospatial Analysis",
+        "Data Quality & Statistics",
     ])
     
     with tab1:
@@ -486,6 +799,39 @@ def main():
     with tab3:
         st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
         display_heatmap(filtered_df)
+
+    with tab4:
+        st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+
+        # --- Section 1: Data Quality ---
+        display_data_quality(filtered_df)
+
+        st.divider()
+
+        # --- Section 2: Statistical Analysis ---
+        display_statistics(filtered_df)
+
+        st.divider()
+
+        # --- Section 3: Visualizations ---
+        st.subheader("Advanced Visualizations")
+        st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
+
+        viz_left, viz_right = st.columns(2)
+
+        with viz_left:
+            display_missing_chart(filtered_df)
+        with viz_right:
+            display_correlation(filtered_df)
+
+        st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+
+        box_col, dist_col = st.columns(2)
+
+        with box_col:
+            display_boxplots(filtered_df)
+        with dist_col:
+            display_distribution(filtered_df)
 
 
 if __name__ == "__main__":
