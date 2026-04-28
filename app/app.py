@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import folium
 from folium.plugins import HeatMap
+import random
 import sys
 from pathlib import Path
 
@@ -142,6 +143,259 @@ def load_data():
     except FileNotFoundError as e:
         st.error(f"Error loading data: {e}")
         st.stop()
+
+
+# ---------------------------------------------------------------------------
+# DATA PROCESSING PIPELINE — Functions
+# ---------------------------------------------------------------------------
+
+@st.cache_data
+def load_raw_crime_data():
+    """Load the raw Chicago Crime CSV."""
+    path = Path("data/chicago_crime.csv")
+    if not path.exists():
+        return None
+    df = pd.read_csv(path, usecols=['Date', 'Primary Type', 'Arrest', 'District', 'Latitude', 'Longitude'])
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+    return df
+
+
+@st.cache_data
+def load_socioeconomic_data():
+    """Load the socioeconomic CSV."""
+    path = Path("data/socioeconomic_data.csv")
+    if not path.exists():
+        return None
+    df = pd.read_csv(path)
+    return df
+
+
+def simulate_data_issues(df, missing_frac=0.015, dup_frac=0.01):
+    """
+    Introduce controlled missing values and duplicate rows.
+    
+    Args:
+        df: Original DataFrame.
+        missing_frac: Fraction of total cells to set as NaN (~1.5%).
+        dup_frac: Fraction of rows to duplicate (~1%).
+    
+    Returns:
+        pd.DataFrame with injected issues.
+    """
+    dirty = df.copy()
+    np.random.seed(42)
+    n_rows, n_cols = dirty.shape
+    n_missing = int(n_rows * n_cols * missing_frac)
+    row_idx = np.random.randint(0, n_rows, size=n_missing)
+    col_idx = np.random.randint(0, n_cols, size=n_missing)
+    for r, c in zip(row_idx, col_idx):
+        dirty.iat[r, c] = np.nan
+
+    n_dups = int(n_rows * dup_frac)
+    dup_rows = dirty.sample(n=min(n_dups, len(dirty)), random_state=42)
+    dirty = pd.concat([dirty, dup_rows], ignore_index=True)
+    return dirty
+
+
+def handle_missing_values(df):
+    """Fill numeric NaN with mean, categorical NaN with mode."""
+    cleaned = df.copy()
+    for col in cleaned.columns:
+        if cleaned[col].isnull().sum() == 0:
+            continue
+        if cleaned[col].dtype in ['float64', 'int64', 'float32', 'int32']:
+            cleaned[col] = cleaned[col].fillna(cleaned[col].mean())
+        else:
+            mode_val = cleaned[col].mode()
+            if not mode_val.empty:
+                cleaned[col] = cleaned[col].fillna(mode_val.iloc[0])
+    return cleaned
+
+
+def remove_duplicates(df):
+    """Remove duplicate rows."""
+    return df.drop_duplicates().reset_index(drop=True)
+
+
+@st.cache_data
+def run_cleaning_pipeline(_df):
+    """
+    Full pipeline: simulate issues → record before stats → clean → record after stats.
+    Returns (dirty_df, cleaned_df, before_stats, after_stats).
+    """
+    dirty = simulate_data_issues(_df)
+    before_stats = {
+        "rows": len(dirty),
+        "missing": int(dirty.isnull().sum().sum()),
+        "duplicates": int(dirty.duplicated().sum()),
+        "missing_per_col": dirty.isnull().sum().to_dict(),
+    }
+    cleaned = handle_missing_values(dirty)
+    cleaned = remove_duplicates(cleaned)
+    after_stats = {
+        "rows": len(cleaned),
+        "missing": int(cleaned.isnull().sum().sum()),
+        "duplicates": int(cleaned.duplicated().sum()),
+        "missing_per_col": cleaned.isnull().sum().to_dict(),
+    }
+    return dirty, cleaned, before_stats, after_stats
+
+
+@st.cache_data
+def merge_datasets(_crime_df, _socio_df):
+    """
+    Attempt to merge crime and socioeconomic datasets.
+    Crime data uses 'District'; socioeconomic uses 'ca' (community area).
+    These are different geographic units, so we aggregate crime by District
+    and display both datasets side-by-side for comparison.
+    
+    Returns:
+        (crime_summary, socio_df, merged_or_None)
+    """
+    crime_summary = (
+        _crime_df.groupby('District')
+        .agg(total_crimes=('Primary Type', 'size'), arrest_rate=('Arrest', 'mean'))
+        .reset_index()
+    )
+    crime_summary['arrest_rate'] = (crime_summary['arrest_rate'] * 100).round(2)
+    return crime_summary, _socio_df, None
+
+
+def display_pipeline_tab(raw_crime_df):
+    """Render the Data Processing Pipeline tab."""
+    st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+
+    if raw_crime_df is None or raw_crime_df.empty:
+        st.error("Raw crime data could not be loaded.")
+        return None
+
+    socio_df = load_socioeconomic_data()
+
+    # --- Run pipeline ---
+    dirty_df, cleaned_df, before, after = run_cleaning_pipeline(raw_crime_df)
+
+    # ── Section 1: Before vs After KPIs ──
+    st.subheader("Before vs After Cleaning")
+    st.markdown("<div style='margin-bottom: 0.5rem;'></div>", unsafe_allow_html=True)
+
+    ba_left, ba_right = st.columns(2)
+    with ba_left:
+        st.markdown("##### ⚠ Before Cleaning")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Rows", f"{before['rows']:,}")
+        c2.metric("Missing Values", f"{before['missing']:,}")
+        c3.metric("Duplicates", f"{before['duplicates']:,}")
+    with ba_right:
+        st.markdown("##### ✅ After Cleaning")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Rows", f"{after['rows']:,}", delta=f"{after['rows'] - before['rows']:,}")
+        c2.metric("Missing Values", f"{after['missing']:,}")
+        c3.metric("Duplicates", f"{after['duplicates']:,}")
+
+    st.markdown("<div style='margin-top: 0.5rem;'></div>", unsafe_allow_html=True)
+    diff = before['rows'] - after['rows']
+    st.info(f"**Rows removed during cleaning:** {diff:,}  (duplicates + deduplication)")
+
+    st.divider()
+
+    # ── Section 2: Missing Values Bar Chart ──
+    st.subheader("Missing Values per Column — Before Cleaning")
+    missing_before = {k: v for k, v in before['missing_per_col'].items() if v > 0}
+
+    if missing_before:
+        cols_m = list(missing_before.keys())
+        vals_m = list(missing_before.values())
+
+        fig, ax = plt.subplots(figsize=(10, max(4, len(cols_m) * 0.5)))
+        bars = ax.barh(cols_m, vals_m, color='#FEB019', alpha=0.85, height=0.6)
+        ax.set_title('Missing Values per Column (Before Cleaning)', fontsize=14, fontweight='bold', pad=15)
+        ax.set_xlabel('Missing Count', fontsize=11)
+        ax.grid(True, axis='x', color='#2D3748', alpha=0.5, linestyle='--')
+        style_plot(fig, ax)
+        for bar, val in zip(bars, vals_m):
+            ax.text(val + max(vals_m) * 0.01, bar.get_y() + bar.get_height() / 2,
+                    f'{val:,}', va='center', fontsize=10, color='#00E6FF', fontweight='bold')
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
+    else:
+        st.success("No missing values detected before cleaning.")
+
+    st.divider()
+
+    # ── Section 3: Before vs After Comparison Chart ──
+    st.subheader("Before vs After — Comparison")
+    labels = ['Total Rows', 'Missing Values', 'Duplicates']
+    before_vals = [before['rows'], before['missing'], before['duplicates']]
+    after_vals = [after['rows'], after['missing'], after['duplicates']]
+
+    fig2, ax2 = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(labels))
+    w = 0.35
+    bars1 = ax2.bar(x - w / 2, before_vals, w, label='Before', color='#FF4560', alpha=0.85)
+    bars2 = ax2.bar(x + w / 2, after_vals, w, label='After', color='#00E396', alpha=0.85)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(labels)
+    ax2.set_title('Before vs After Cleaning', fontsize=14, fontweight='bold', pad=15)
+    ax2.legend(facecolor='#1A1C24', edgecolor='#2D3748', labelcolor='#A0AEC0')
+    ax2.grid(True, axis='y', color='#2D3748', alpha=0.5, linestyle='--')
+    style_plot(fig2, ax2)
+
+    for bar in bars1:
+        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                 f'{int(bar.get_height()):,}', ha='center', va='bottom',
+                 fontsize=9, color='#FF4560', fontweight='bold')
+    for bar in bars2:
+        ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                 f'{int(bar.get_height()):,}', ha='center', va='bottom',
+                 fontsize=9, color='#00E396', fontweight='bold')
+
+    plt.tight_layout()
+    st.pyplot(fig2)
+    plt.close()
+
+    st.divider()
+
+    # ── Section 4: Merged / Socioeconomic Data ──
+    st.subheader("Dataset Merge — Crime & Socioeconomic")
+    if socio_df is not None and not socio_df.empty:
+        crime_summary, socio_display, _ = merge_datasets(cleaned_df, socio_df)
+
+        st.markdown("""
+        > **Note:** Crime data is keyed by *District* while socioeconomic data is keyed by
+        > *Community Area*. These are different geographic units in Chicago, so a direct
+        > row-level merge is not meaningful. Both summaries are displayed below.
+        """)
+
+        merge_left, merge_right = st.columns(2)
+        with merge_left:
+            st.markdown("##### Crime Summary by District")
+            st.dataframe(crime_summary, use_container_width=True, hide_index=True,
+                         height=min(len(crime_summary) * 38 + 40, 400))
+        with merge_right:
+            st.markdown("##### Socioeconomic Indicators by Community Area")
+            st.dataframe(socio_display, use_container_width=True, hide_index=True,
+                         height=min(len(socio_display) * 38 + 40, 400))
+
+        # Quick insight chart
+        st.markdown("<div style='margin-top: 1rem;'></div>", unsafe_allow_html=True)
+        st.markdown("##### Socioeconomic Insight — Hardship Index Distribution")
+        if 'hardship_index' in socio_display.columns:
+            hi = socio_display['hardship_index'].dropna()
+            fig3, ax3 = plt.subplots(figsize=(10, 4))
+            ax3.hist(hi, bins=20, color='#775DD0', alpha=0.8, edgecolor='#1A1C24')
+            ax3.set_title('Hardship Index Distribution', fontsize=14, fontweight='bold', pad=15)
+            ax3.set_xlabel('Hardship Index', fontsize=11)
+            ax3.set_ylabel('Frequency', fontsize=11)
+            ax3.grid(True, axis='y', color='#2D3748', alpha=0.5, linestyle='--')
+            style_plot(fig3, ax3)
+            plt.tight_layout()
+            st.pyplot(fig3)
+            plt.close()
+    else:
+        st.warning("Socioeconomic data could not be loaded.")
+
+    return cleaned_df
 
 
 def apply_filters(df, selected_years, selected_crime_types, selected_districts):
@@ -596,7 +850,7 @@ def display_correlation(df):
         square=True,
         cbar_kws={"shrink": 0.8},
         ax=ax,
-        annot_kws={"size": 10, "color": "#FAFAFA"},
+        annot_kws={"size": 10},
     )
     ax.set_title('Correlation Matrix', fontsize=14, fontweight='bold', pad=15)
     ax.tick_params(colors='#A0AEC0', labelsize=10)
@@ -711,8 +965,9 @@ def main():
         </div>
     """, unsafe_allow_html=True)
     
-    # Load data
+    # Load data — cleaned data for dashboard, raw data for pipeline tab
     df = load_data()
+    raw_crime_df = load_raw_crime_data()
     
     # Sidebar filters styling
     st.sidebar.markdown("""
@@ -773,11 +1028,12 @@ def main():
     st.markdown("<div style='margin-bottom: 2rem;'></div>", unsafe_allow_html=True)
     
     # Visual sections embedded in professional tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Overview & Trends", 
         "Demographics & Time", 
         "Geospatial Analysis",
         "Data Quality & Statistics",
+        "Data Processing Pipeline",
     ])
     
     with tab1:
@@ -832,6 +1088,9 @@ def main():
             display_boxplots(filtered_df)
         with dist_col:
             display_distribution(filtered_df)
+
+    with tab5:
+        display_pipeline_tab(raw_crime_df)
 
 
 if __name__ == "__main__":
